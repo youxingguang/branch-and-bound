@@ -27,10 +27,17 @@ public class BTree {
 	{
 		Node node;
 		double lpObjValue;
+		double[] solution;//节点的解
 		public NodeInfo(Node node,double lpObjValue)
 		{
 			this.node=node;
 			this.lpObjValue=lpObjValue;
+		}
+		public NodeInfo(Node node,double lpObjValue,double[] solution)
+		{
+			this.node=node;
+			this.lpObjValue=lpObjValue;
+			this.solution=Arrays.copyOf(solution, IPProblem.nCol);
 		}
 	}
 	PriorityQueue<NodeInfo> nodeQueue;//优先队列 目标值排序
@@ -58,7 +65,8 @@ public class BTree {
 			cplexRoot=rootNodelAndVars.cplex;
 			if(cplexRoot.solve())
 			{
-				nodeQueue.add(new NodeInfo(root,cplexRoot.getObjValue()));
+				double[] rootSolution=cplexRoot.getValues(rootNodelAndVars.vars);
+				nodeQueue.add(new NodeInfo(root,cplexRoot.getObjValue(),rootSolution));
 			}else
 			{
 				//表明根节点松弛问题不可行
@@ -98,145 +106,102 @@ public class BTree {
 				}
 			}
 			
-			//求解当前点的线性松弛
-			IloCplex cplex=null;
-			IloNumVar[] vars=null;
+			//对当前节点判断: 
+			double[] currSolution=currNodeInfo.solution;
+					
+			//检查解的类型
+			boolean isIntegerSolution=true;//默认要求整数解
 			
-			try {
+			int branchVarIndex=-1;//要分支的变量索引
+			double branchVal=0.0;
+			
+			//判断 并 遍历找到第一个分数解 即作为要分支的变量
+			for(int i=0;i<IPProblem.nCol;i++)
+			{
+				//更严谨 需要先判断该变量是否要求为整数解 省略，默认都要求整数解
 				
-				IPProblem.ModelAndVars modelAndVars=currNode.buildLPR();
-				cplex=modelAndVars.cplex;
-				vars=modelAndVars.vars;
-				
-				//禁用 MIP 启动
-				cplex.setParam(IloCplex.Param.MIP.Limits.Nodes, 0);
-				if(cplex.solve())
+				double val=currSolution[i];
+				if(Math.abs(val-Math.round(val))>1e-6)
 				{
-					double lpObjValue=cplex.getObjValue();
-					double[] varsValue=new double[IPProblem.nCol];
-					
-					for(int i=0;i<IPProblem.nCol;i++)
-					{
-						varsValue[i]=cplex.getValue(vars[i]);
-					}
-					
-					//检查解的类型
-					boolean isIntegerSolution=true;//默认要求整数解
-					
-					int branchVarIndex=-1;//要分支的变量索引
-					double branchVal=0.0;
-					
-					//遍历第一个分数解 即作为要分支的变量
-					for(int i=0;i<IPProblem.nCol;i++)
-					{
-						//更严谨 需要先判断该变量是否要求为整数解 省略，默认都要求整数解
-						
-						double val=varsValue[i];
-						if(Math.abs(val-Math.round(val))>1e-6)
-						{
-							//找到分数解
-							isIntegerSolution=false;//标记
-							branchVarIndex=i;
-							branchVal=val;
-							break;
-						}
-					}
+					//找到分数解
+					isIntegerSolution=false;//标记
+					branchVarIndex=i;
+					branchVal=val;
+					break;
+				}
+			}
 					
 					
-					if(isIntegerSolution)
-					{
-						//如果当前是整数解,更新全局最优解
-						System.out.println("找到一个整数解在节点深度:"+currNode.depth+": "+Arrays.toString(varsValue)+" obj:"+lpObjValue);
-						
-						if(lpObjValue<bestObjValue)
-						{
-							bestObjValue=lpObjValue;
-							bestSolution=Arrays.copyOf(varsValue,IPProblem.nCol);
-							foundIntegerSolution=true;
-						}
+			if(isIntegerSolution)
+			{
+				//如果当前是整数解,更新全局最优解
+				System.out.println("找到一个整数解在节点深度:"+currNode.depth+": "+Arrays.toString(currSolution)+" obj:"+currLPObjValue);
 				
-					}else
-					{
-						//非整数解,分支
-						Node[] children=currNode.branch(branchVarIndex, branchVal);
-						for(Node child:children)
+				if(currLPObjValue<bestObjValue)
+				{
+					bestObjValue=currLPObjValue;
+					bestSolution=Arrays.copyOf(currSolution,IPProblem.nCol);
+					foundIntegerSolution=true;
+				}
+		
+			}else
+			{
+				//非整数解,分支
+				Node[] children=currNode.branch(branchVarIndex, branchVal);
+				for(Node child:children)
+				{
+					//求解子节点添加队列
+					IloCplex cplexChild=null;
+					try {
+						
+						IPProblem.ModelAndVars childModelAndVars=child.buildLPR();
+						cplexChild=childModelAndVars.cplex;
+						cplexChild.setParam(IloCplex.Param.MIP.Limits.Nodes, 0);
+						if(cplexChild.solve())
 						{
-							//求解子节点添加队列
-							IloCplex cplexChild=null;
-							try {
-								
-								IPProblem.ModelAndVars childModelAndVars=child.buildLPR();
-								cplexChild=childModelAndVars.cplex;
-								cplexChild.setParam(IloCplex.Param.MIP.Limits.Nodes, 0);
-								if(cplexChild.solve())
-								{
-									double childLPObjValue=cplexChild.getObjValue();
-									
-									//依据新目标值重新剪枝判断
-									boolean canPruneChild=false;
-									
-									if(foundIntegerSolution)
-									{
-										if(childLPObjValue>=bestObjValue)
-										{
-											canPruneChild=true;//剪去
-										}
-									}
-									
-									//若不能剪去
-									if(!canPruneChild)
-									{
-										nodeQueue.add(new NodeInfo(child,childLPObjValue));
-									}
-									
-									
-								}else
-								{
-									System.out.println(" 子节点不可行 ");
-								}
-								
-							}catch(IloException e)
+							double childLPObjValue=cplexChild.getObjValue();
+							
+							//依据新目标值重新剪枝判断
+							boolean canPruneChild=false;
+							
+							if(foundIntegerSolution)
 							{
-								
-								System.err.println("Concert exception caught: " + e.getMessage());
-							}finally
-							{
-								if(cplexChild!=null)
+								if(childLPObjValue>=bestObjValue)
 								{
-									cplexChild.end();
+									canPruneChild=true;//能剪去
 								}
 							}
 							
+							//若不能剪去
+							if(!canPruneChild)
+							{
+								double[] values=cplexChild.getValues(childModelAndVars.vars);
+								nodeQueue.add(new NodeInfo(child,childLPObjValue,values));
+							}
+							
+							
+						}else
+						{
+							System.out.println(" 子节点不可行 ");
 						}
 						
+					}catch(IloException e)
+					{
+						
+						System.err.println("Concert exception caught: " + e.getMessage());
+					}finally
+					{
+						if(cplexChild!=null)
+						{
+							cplexChild.end();
+						}
 					}
 					
-					
-					
-					
-					
-				}else
-				{
-					//当前节点松弛不可行,探索其他节点
-					System.out.println("当前节点松弛不可行,探索其他节点");
-					
 				}
-			
-			
-			
-			
-			
-			}catch(IloException e)
-			{
 				
-				System.err.println("Concert exception caught: " + e.getMessage());
-			}finally
-			{
-				if(cplex!=null)
-				{
-					cplex.end();
-				}
 			}
+
+			
 		}//end while
 			
 		if(foundIntegerSolution)
